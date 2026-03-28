@@ -7,9 +7,9 @@ import requests
 import urllib.parse
 import uuid
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Request, Response, Cookie
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 import pandas as pd
@@ -30,20 +30,27 @@ from modules.mail_sender import send_employee_mail
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("payslip_automation")
 
-app = FastAPI(title="MainstreamTek Multi-User Pipeline")
+app = FastAPI(title="MainstreamTek Production Pipeline")
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip('/')
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL],
-    allow_credentials=True, 
+    allow_origins=["*"], # In production, you can keep "*" or use [FRONTEND_URL]
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # --- Session Storage ---
 USER_SESSIONS: Dict[str, dict] = {}
+
+def get_session_id(request: Request) -> Optional[str]:
+    """Helper to extract session_id from the Authorization header."""
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        return auth_header.split(" ")[1]
+    return None
 
 def add_log(session_id: str, message: str):
     if session_id in USER_SESSIONS:
@@ -73,12 +80,11 @@ def get_creds_from_session(session_id: str):
         logger.error(f"Cred refresh error: {e}")
         return None
 
-# --- Endpoints ---
+# --- API Endpoints ---
 
 @app.get("/auth/login")
 def login():
-    """Starts OAuth flow and passes a new session_id as the 'state' parameter."""
-    # Generate a temporary session ID to track this login attempt
+    """Generates Login URL and attaches a temporary session ID in the state."""
     session_id = str(uuid.uuid4())
     USER_SESSIONS[session_id] = {
         "creds": None, "logs": [], "is_running": False, "last_run": None
@@ -91,18 +97,18 @@ def login():
         "scope": " ".join(config.SCOPES),
         "access_type": "offline",
         "prompt": "consent",
-        "state": session_id,  # <--- CRITICAL: Pass session ID to Google
+        "state": session_id,
         "include_granted_scopes": "true"
     }
     url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
     return {"url": url}
 
 @app.get("/auth/callback")
-def auth_callback(code: str, state: str, response: Response):
-    """Google returns the 'state' (session_id). We use it to save the token."""
+def auth_callback(code: str, state: str):
+    """Callback from Google. Returns session_id as a query param to the frontend."""
     session_id = state 
     if session_id not in USER_SESSIONS:
-        return RedirectResponse(url=f"{FRONTEND_URL}?error=invalid_state")
+        return RedirectResponse(url=f"{FRONTEND_URL}?error=invalid_session")
 
     try:
         token_data = {
@@ -117,7 +123,6 @@ def auth_callback(code: str, state: str, response: Response):
         if 'error' in res:
             raise Exception(res.get('error_description', res['error']))
 
-        # Save credentials to this specific session
         USER_SESSIONS[session_id]["creds"] = {
             "token": res['access_token'],
             "refresh_token": res.get('refresh_token'),
@@ -127,23 +132,16 @@ def auth_callback(code: str, state: str, response: Response):
             "scopes": config.SCOPES
         }
         
-        # Now set the cookie so the frontend can poll /status
-        response = RedirectResponse(url=FRONTEND_URL)
-        response.set_cookie(
-            key="session_id", 
-            value=session_id, 
-            httponly=True, 
-            samesite="none", 
-            secure=True, 
-            max_age=86400
-        )
-        return response
+        # INSTEAD OF COOKIES: Pass the session_id back in the URL
+        return RedirectResponse(url=f"{FRONTEND_URL}/?session_id={session_id}")
+
     except Exception as e:
         logger.error(f"Callback Error: {e}")
         return RedirectResponse(url=f"{FRONTEND_URL}?error=auth_failed")
 
 @app.get("/auth/status")
-def get_auth_status(session_id: str = Cookie(None)):
+def get_auth_status(request: Request):
+    session_id = get_session_id(request)
     creds = get_creds_from_session(session_id)
     if creds:
         try:
@@ -151,18 +149,19 @@ def get_auth_status(session_id: str = Cookie(None)):
             user_info = service.userinfo().get().execute()
             return {"authenticated": True, "email": user_info['email']}
         except:
-            return {"authenticated": False}
+            pass
     return {"authenticated": False}
 
 @app.post("/auth/logout")
-def logout(response: Response, session_id: str = Cookie(None)):
-    if session_id in USER_SESSIONS:
+def logout(request: Request):
+    session_id = get_session_id(request)
+    if session_id and session_id in USER_SESSIONS:
         del USER_SESSIONS[session_id]
-    response.delete_cookie("session_id", samesite="none", secure=True)
     return {"message": "Logged out"}
 
 @app.get("/status")
-def get_status(session_id: str = Cookie(None)):
+def get_status(request: Request):
+    session_id = get_session_id(request)
     session = USER_SESSIONS.get(session_id)
     if not session:
         return {"is_running": False, "logs": [], "last_run": None}
@@ -173,45 +172,42 @@ def get_status(session_id: str = Cookie(None)):
     }
 
 @app.post("/start")
-def start_process(background_tasks: BackgroundTasks, session_id: str = Cookie(None)):
+def start_process(background_tasks: BackgroundTasks, request: Request):
+    session_id = get_session_id(request)
     session = USER_SESSIONS.get(session_id)
     creds = get_creds_from_session(session_id)
     if not creds or not session:
         raise HTTPException(status_code=401, detail="Please login first.")
+    
     if session["is_running"]:
         raise HTTPException(status_code=400, detail="Running...")
     
     background_tasks.add_task(run_automation_pipeline, session_id, creds)
     return {"message": "Started"}
 
-# --- Pipeline Logic ---
+# --- Pipeline Logic (Same as before) ---
 
 def run_automation_pipeline(session_id, creds):
     session = USER_SESSIONS[session_id]
     session["is_running"] = True
     session["logs"] = []
     add_log(session_id, "🚀 INITIALIZING PIPELINE...")
-
     try:
         sheets_service = build('sheets', 'v4', credentials=creds)
         res = sheets_service.spreadsheets().values().get(
             spreadsheetId=config.MASTER_SHEET_ID, range="Sheet1!A1:Z200"
         ).execute()
-        
         raw_rows = res.get('values', [])
         rows = [r for r in raw_rows if any(cell.strip() for cell in r if cell)]
         headers = [h.strip() for h in rows[0]]
         master_df = pd.DataFrame([dict(zip(headers, r + [""]*(len(headers)-len(r)))) for r in rows[1:]])
         add_log(session_id, f"✅ Data Loaded: {len(master_df)} records.")
-
         zip_path = fetch_zip_from_mail(creds)
         if not zip_path:
             add_log(session_id, "⚠️ No ZIP found.")
             return
-
         pdf_folder = extract_zip(zip_path)
         pdf_files = [os.path.join(r, f) for r, d, fs in os.walk(pdf_folder) for f in fs if f.lower().endswith('.pdf')]
-
         for path in pdf_files:
             name = os.path.basename(path)
             add_log(session_id, f"Processing: {name}")
@@ -220,7 +216,6 @@ def run_automation_pipeline(session_id, creds):
             if not data: continue
             emp, mon = data.get("Employee Name", "Unknown"), data.get("Month", "Unknown")
             val_res = validate_employee(data, master_df)
-            
             if val_res["status"] == "PASS":
                 add_log(session_id, f"   - ✅ PASS: {emp}")
                 send_employee_mail(val_res["email"], path, emp, mon, creds)
@@ -229,7 +224,6 @@ def run_automation_pipeline(session_id, creds):
                 add_log(session_id, f"   - ❌ FAIL: {val_res.get('reason')}")
                 move_file(fid, config.ERROR_FOLDER_ID, mon, creds)
             update_report(emp, val_res, mon, creds)
-
         add_log(session_id, "🎉 COMPLETED.")
     except Exception as e:
         add_log(session_id, f"🚨 ERROR: {str(e)}")
