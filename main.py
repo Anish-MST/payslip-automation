@@ -174,6 +174,12 @@ def get_pipeline_status():
         "logs": state.logs[-50:], 
         "last_run": state.last_run
     }
+@app.post("/auth/logout")
+def logout():
+    """Clears the user credentials from memory."""
+    state.user_creds = None
+    add_log("👤 User logged out.")
+    return {"message": "Logged out successfully"}
 
 @app.post("/start")
 def start_process(background_tasks: BackgroundTasks):
