@@ -14,7 +14,13 @@ def get_flow():
             "redirect_uris": [f"{os.getenv('BACKEND_URL')}/auth/callback"]
         }
     }
-    return Flow.from_client_config(
+    
+    flow = Flow.from_client_config(
         client_config,
         scopes=config.SCOPES
     )
+    
+    # EXPLICITLY set the redirect_uri here
+    flow.redirect_uri = f"{os.getenv('BACKEND_URL')}/auth/callback"
+    
+    return flow
