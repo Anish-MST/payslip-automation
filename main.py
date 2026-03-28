@@ -3,7 +3,8 @@ import shutil
 import logging
 import traceback
 import json
-import requests  # Added for manual token exchange
+import requests
+import urllib.parse  # Added for manual URL construction
 from datetime import datetime
 from typing import List
 
@@ -12,7 +13,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 import pandas as pd
 from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleRequest
 
@@ -54,33 +54,24 @@ def add_log(message: str):
     state.logs.append(f"[{timestamp}] {message}")
     logger.info(message)
 
-# --- OAuth2 Helpers ---
-
-def get_google_flow():
-    backend_url = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip('/')
-    redirect_uri = f"{backend_url}/auth/callback"
-    
-    client_config = {
-        "web": {
-            "client_id": os.getenv("GOOGLE_CLIENT_ID"),
-            "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-        }
-    }
-    
-    flow = Flow.from_client_config(client_config, scopes=config.SCOPES)
-    flow.redirect_uri = redirect_uri
-    return flow
-
 def get_current_creds():
+    """Helper to convert stored dict back to Google Credentials object."""
     if not state.user_creds:
         return None
     try:
-        creds = Credentials.from_authorized_user_info(state.user_creds, config.SCOPES)
-        if creds and creds.expired and creds.refresh_token:
+        # Load from the dictionary stored in RAM
+        creds = Credentials(
+            token=state.user_creds['token'],
+            refresh_token=state.user_creds.get('refresh_token'),
+            token_uri=state.user_creds['token_uri'],
+            client_id=state.user_creds['client_id'],
+            client_secret=state.user_creds['client_secret'],
+            scopes=state.user_creds['scopes']
+        )
+        if creds.expired and creds.refresh_token:
             creds.refresh(GoogleRequest())
-            state.user_creds = json.loads(creds.to_json())
+            # Update RAM storage after refresh
+            state.user_creds['token'] = creds.token
         return creds
     except Exception as e:
         logger.error(f"Error refreshing credentials: {e}")
@@ -90,15 +81,33 @@ def get_current_creds():
 
 @app.get("/auth/login")
 def login():
+    """
+    MANUAL LOGIN URL CONSTRUCTION
+    We avoid using the 'flow' library here to prevent it from injecting 
+    PKCE (code_challenge) which causes the 'Missing code verifier' error.
+    """
     try:
-        flow = get_google_flow()
-        # We generate the URL normally
-        authorization_url, _ = flow.authorization_url(
-            prompt='consent', 
-            access_type='offline',
-            include_granted_scopes='true'
-        )
-        return {"url": authorization_url}
+        client_id = os.getenv("GOOGLE_CLIENT_ID")
+        backend_url = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip('/')
+        redirect_uri = f"{backend_url}/auth/callback"
+        
+        # Space-separated scopes
+        scope_str = " ".join(config.SCOPES)
+        
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": scope_str,
+            "access_type": "offline", # Crucial for getting a refresh_token
+            "prompt": "consent",
+            "include_granted_scopes": "true"
+        }
+        
+        base_url = "https://accounts.google.com/o/oauth2/v2/auth"
+        auth_url = f"{base_url}?{urllib.parse.urlencode(params)}"
+        
+        return {"url": auth_url}
     except Exception as e:
         logger.error(f"Login URL Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -107,13 +116,12 @@ def login():
 def auth_callback(code: str):
     """
     MANUAL TOKEN EXCHANGE
-    This bypasses the 'code_verifier' issue by talking directly to Google's token API.
+    Receives the code from Google and exchanges it for an Access Token.
     """
     try:
         backend_url = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip('/')
         redirect_uri = f"{backend_url}/auth/callback"
 
-        # 1. Manually prepare the data for Google's token endpoint
         token_data = {
             'code': code,
             'client_id': os.getenv("GOOGLE_CLIENT_ID"),
@@ -122,15 +130,14 @@ def auth_callback(code: str):
             'grant_type': 'authorization_code',
         }
 
-        # 2. POST to Google's token service
+        # POST to Google's token service
         response = requests.post("https://oauth2.googleapis.com/token", data=token_data)
         token_json = response.json()
 
         if 'error' in token_json:
             raise Exception(f"Google Token Error: {token_json.get('error_description', token_json['error'])}")
 
-        # 3. Format the token data into a format the Google Auth library understands
-        # We add client_id and client_secret so the 'Credentials' object can auto-refresh
+        # Store exactly what the automation needs
         state.user_creds = {
             "token": token_json['access_token'],
             "refresh_token": token_json.get('refresh_token'),
@@ -152,6 +159,7 @@ def get_auth_status():
     creds = get_current_creds()
     if creds:
         try:
+            # Check who is logged in
             service = build('oauth2', 'v2', credentials=creds)
             user_info = service.userinfo().get().execute()
             return {"authenticated": True, "email": user_info['email']}
