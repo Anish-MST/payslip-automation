@@ -7,3 +7,4 @@ pdfplumber
 python-multipart
 python-dotenv
 openpyxl
+requests
