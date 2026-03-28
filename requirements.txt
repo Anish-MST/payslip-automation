@@ -1,8 +1,9 @@
+fastapi
+uvicorn
 google-api-python-client
-google-auth-httplib2
 google-auth-oauthlib
-gspread
 pandas
-openpyxl
-pypdf2
 pdfplumber
+python-multipart
+python-dotenv
+openpyxl
