@@ -3,12 +3,8 @@ import config
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-def get_drive_service(creds):
-    """Initializes the Google Drive API service with dynamic creds."""
-    return build('drive', 'v3', credentials=creds)
-
 def upload_to_drive(file_path, creds):
-    service = get_drive_service(creds)
+    service = build('drive', 'v3', credentials=creds)
     file_name = os.path.basename(file_path)
     
     file_metadata = {
@@ -42,7 +38,7 @@ def get_or_create_subfolder(service, parent_id, folder_name):
         return folder.get('id')
 
 def move_file(file_id, target_parent_id, month_name, creds):
-    service = get_drive_service(creds)
+    service = build('drive', 'v3', credentials=creds)
     target_folder_id = get_or_create_subfolder(service, target_parent_id, month_name)
     
     file = service.files().get(fileId=file_id, fields='parents').execute()

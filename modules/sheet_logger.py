@@ -1,31 +1,24 @@
 import config
 from datetime import datetime
 from googleapiclient.discovery import build
-from modules.gmail_auth import get_credentials
 
-def update_report(name, result, month_name):
+def update_report(name, result, month_name, creds):
     try:
-        creds = get_credentials()
+        # Initialize service using the credentials passed from main.py
         service = build('sheets', 'v4', credentials=creds)
         spreadsheet_id = config.LOGGER_SHEET_ID
 
-        # 1. Check if the Month Tab exists, if not create it
+        # 1. Check if the Month Tab exists
         sheet_metadata = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         sheets = sheet_metadata.get('sheets', [])
         sheet_exists = any(s['properties']['title'] == month_name for s in sheets)
 
         if not sheet_exists:
-            # Create a new tab
-            request_body = {
-                'requests': [{
-                    'addSheet': {
-                        'properties': {'title': month_name}
-                    }
-                }]
-            }
+            # Create tab if it doesn't exist
+            request_body = {'requests': [{'addSheet': {'properties': {'title': month_name}}}]}
             service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body=request_body).execute()
             
-            # Add Headers to new tab
+            # Add Headers
             headers = [["Timestamp", "Employee Name", "Status", "Details", "Mail ID"]]
             service.spreadsheets().values().update(
                 spreadsheetId=spreadsheet_id,
@@ -52,4 +45,4 @@ def update_report(name, result, month_name):
         ).execute()
 
     except Exception as e:
-        print(f"   - Error logging to month tab: {e}")
+        print(f"   - Error logging to sheet: {e}")
