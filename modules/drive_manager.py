@@ -41,12 +41,23 @@ def move_file(file_id, target_parent_id, month_name, creds):
     service = build('drive', 'v3', credentials=creds)
     target_folder_id = get_or_create_subfolder(service, target_parent_id, month_name)
     
+    # Get current parents
     file = service.files().get(fileId=file_id, fields='parents').execute()
-    previous_parents = ",".join(file.get('parents'))
-    
-    service.files().update(
-        fileId=file_id,
-        addParents=target_folder_id,
-        removeParents=previous_parents,
-        fields='id, parents'
-    ).execute()
+    parents_list = file.get('parents')
+
+    # FIX: Check if parents_list exists before joining
+    if parents_list:
+        previous_parents = ",".join(parents_list)
+        service.files().update(
+            fileId=file_id,
+            addParents=target_folder_id,
+            removeParents=previous_parents,
+            fields='id, parents'
+        ).execute()
+    else:
+        # If no parents found, just add the new one
+        service.files().update(
+            fileId=file_id,
+            addParents=target_folder_id,
+            fields='id, parents'
+        ).execute()

@@ -84,24 +84,35 @@ def get_creds_from_session(session_id: str):
 
 @app.get("/auth/login")
 def login():
-    """Generates Login URL and attaches a temporary session ID in the state."""
-    session_id = str(uuid.uuid4())
-    USER_SESSIONS[session_id] = {
-        "creds": None, "logs": [], "is_running": False, "last_run": None
-    }
-    
-    params = {
-        "client_id": os.getenv("GOOGLE_CLIENT_ID"),
-        "redirect_uri": f"{os.getenv('BACKEND_URL').rstrip('/')}/auth/callback",
-        "response_type": "code",
-        "scope": " ".join(config.SCOPES),
-        "access_type": "offline",
-        "prompt": "consent",
-        "state": session_id,
-        "include_granted_scopes": "true"
-    }
-    url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
-    return {"url": url}
+    try:
+        client_id = os.getenv("GOOGLE_CLIENT_ID")
+        backend_url = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip('/')
+        redirect_uri = f"{backend_url}/auth/callback"
+        
+        # Ensure SCOPES is definitely a list before joining
+        scope_str = " ".join(list(config.SCOPES))
+        
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": scope_str,
+            "access_type": "offline",
+            "prompt": "consent",
+            "state": str(uuid.uuid4()), # Generate a new ID for the login attempt
+            "include_granted_scopes": "true"
+        }
+        
+        base_url = "https://accounts.google.com/o/oauth2/v2/auth"
+        auth_url = f"{base_url}?{urllib.parse.urlencode(params)}"
+        
+        # Add a temporary session for this state
+        USER_SESSIONS[params["state"]] = {"creds": None, "logs": [], "is_running": False, "last_run": None}
+        
+        return {"url": auth_url}
+    except Exception as e:
+        logger.error(f"Login URL Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/auth/callback")
 def auth_callback(code: str, state: str):
