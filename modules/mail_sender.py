@@ -5,33 +5,26 @@ from googleapiclient.discovery import build
 
 def send_employee_mail(employee_email, pdf_path, emp_name, month, creds):
     """
-    Sends a personalized email to the employee using the dynamically logged-in user.
-    'creds' is passed from the production OAuth session.
+    Sends a concise, professional email to the employee.
     """
     try:
-        # Initialize the Gmail service with dynamic credentials
         service = build('gmail', 'v1', credentials=creds)
 
-        # Create the email container
         msg = EmailMessage()
         
-        # Personalized Subject
-        msg['Subject'] = f"Monthly Payslip - {month} | {emp_name}"
-        
-        # In Gmail API, when using userId='me', the 'From' header is 
-        # automatically handled by the authenticated account.
+        # --- CLEAN SUBJECT ---
+        msg['Subject'] = f"Payslip: {month} - {emp_name}"
         msg['To'] = employee_email
         
-        # Personalized Body Content
+        # --- CONCISE BODY CONTENT ---
         body_content = f"""Dear {emp_name},
 
-Please find attached your payslip for the month of {month}.
+Please find your payslip for {month} attached. 
 
-This is an automated email sent from the HR Payroll System. If you find any discrepancies in your payslip, please reach out to the HR department.
+For any queries, please contact Jamuna at jamuna@mainstreamtek.com.
 
-Best Regards,
-HR Operations Team
-MainstreamTek Private Limited"""
+Regards,
+HR Operations | MainstreamTek"""
 
         msg.set_content(body_content)
 
@@ -50,10 +43,10 @@ MainstreamTek Private Limited"""
             print(f"   - Attachment error: File not found at {pdf_path}")
             return False
 
-        # Base64 Encoding (Required by Gmail API send method)
+        # Base64 Encoding for Gmail API
         encoded_message = base64.urlsafe_b64encode(msg.as_bytes()).decode('utf-8')
         
-        # Send using the 'me' shortcut for the logged-in user
+        # Send
         service.users().messages().send(
             userId="me", 
             body={'raw': encoded_message}
@@ -62,6 +55,5 @@ MainstreamTek Private Limited"""
         return True
         
     except Exception as e:
-        # This will show up in your Render.com logs
         print(f"   - Failed to send mail to {emp_name} ({employee_email}): {e}")
         return False
