@@ -25,6 +25,7 @@ from modules.drive_manager import upload_to_drive, move_file
 from modules.pdf_parser import extract_employee_name 
 from modules.validator import validate_employee      
 from modules.sheet_logger import update_report, get_already_passed_employees
+from modules.mail_sender import send_employee_mail # <--- ENSURE THIS IS HERE
 
 # --- Setup ---
 logging.basicConfig(level=logging.INFO)
@@ -165,7 +166,6 @@ def run_automation_pipeline(session_id, creds):
         # 3. Processing Loop
         month_cache = {}
         for zip_path in zip_paths:
-            # SAFETY CHECK: Skip if the path is not a file (fixes IsADirectoryError)
             if not zip_path or not os.path.isfile(zip_path):
                 continue
 
@@ -179,28 +179,33 @@ def run_automation_pipeline(session_id, creds):
                 for path in pdf_files:
                     data = extract_employee_name(path)
                     if not data: continue
-                    name, month = data.get("Employee Name", "Unknown"), data.get("Month", "Unknown")
+                    
+                    emp_name = data.get("Employee Name", "Unknown")
+                    month = data.get("Month", "Unknown")
 
+                    # DUPLICATE PREVENTION: Skip if PASS
                     if month not in month_cache:
                         month_cache[month] = get_already_passed_employees(month, creds)
                     
-                    if name in month_cache[month]:
-                        add_log(session_id, f"   - ⏭️ SKIP: {name} (Already PASS)")
+                    if emp_name in month_cache[month]:
+                        add_log(session_id, f"   - ⏭️ SKIP: {emp_name} (Already PASS)")
                         continue
 
-                    add_log(session_id, f"   - Validating: {name}")
-                    fid = upload_to_drive(path, creds)
-                    val = validate_employee(data, master_df)
+                    add_log(session_id, f"   - Validating: {emp_name}")
+                    file_id = upload_to_drive(path, creds)
+                    val_res = validate_employee(data, master_df)
                     
-                    if val["status"] == "PASS":
+                    if val_res["status"] == "PASS":
                         add_log(session_id, f"   - ✅ SENDING EMAIL...")
-                        send_employee_mail(val["email"], path, name, month, creds)
-                        move_file(fid, config.SENT_FOLDER_ID, month, creds)
+                        # FIXED: Using emp_name variable instead of 'name'
+                        send_employee_mail(val_res["email"], path, emp_name, month, creds)
+                        move_file(file_id, config.SENT_FOLDER_ID, month, creds)
                     else:
-                        add_log(session_id, f"   - ❌ FAIL: {val.get('reason')}")
-                        move_file(fid, config.ERROR_FOLDER_ID, month, creds)
+                        add_log(session_id, f"   - ❌ FAIL: {val_res.get('reason')}")
+                        move_file(file_id, config.ERROR_FOLDER_ID, month, creds)
 
-                    update_report(name, val, month, creds)
+                    # Update or Overwrite Log Sheet
+                    update_report(emp_name, val_res, month, creds)
 
                 if os.path.exists(pdf_folder): shutil.rmtree(pdf_folder)
             except Exception as e:
@@ -220,4 +225,5 @@ def run_automation_pipeline(session_id, creds):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
