@@ -4,8 +4,10 @@ import config
 from googleapiclient.discovery import build
 
 def fetch_zip_from_mail(creds):
+    """
+    Finds unread payroll emails and downloads ZIPs to /tmp/
+    """
     service = build('gmail', 'v1', credentials=creds)
-    # Refined query to be very specific
     query = 'subject:"Telangana Mainstreamtek" subject:"Payroll" is:unread has:attachment'
     zip_file_paths = []
 
@@ -15,6 +17,11 @@ def fetch_zip_from_mail(creds):
 
         if not messages:
             return []
+
+        # Ensure we use the absolute /tmp path for Render compatibility
+        temp_dir = config.TEMP_FOLDER 
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir, exist_ok=True)
 
         for msg_info in messages:
             msg_id = msg_info['id']
@@ -35,34 +42,31 @@ def fetch_zip_from_mail(creds):
 
             target_part = find_zip_attachment(parts)
 
-            # CRITICAL FIX: Only proceed if a ZIP part was actually found
             if target_part and target_part.get('filename'):
                 att_id = target_part['body']['attachmentId']
-                filename = f"{msg_id}.zip" # Use message ID as filename for safety
+                # Create a specific filename using the message ID
+                filename = f"payroll_{msg_id}.zip"
                 
                 attachment = service.users().messages().attachments().get(
                     userId='me', messageId=msg_id, id=att_id
                 ).execute()
                 
                 file_data = base64.urlsafe_b64decode(attachment['data'].encode('UTF-8'))
-
-                # Ensure we are using the absolute /tmp path for Render
-                temp_dir = "/tmp/payslip_temp"
-                if not os.path.exists(temp_dir):
-                    os.makedirs(temp_dir, exist_ok=True)
-                    
                 path = os.path.join(temp_dir, filename)
+                
                 with open(path, 'wb') as f:
                     f.write(file_data)
                 
+                # Only add if it's a valid file
                 if os.path.isfile(path):
                     zip_file_paths.append(path)
 
-                # Mark as read so we don't process it again if the pipeline crashes later
-                service.users().messages().batchModify(
-                    userId='me',
-                    body={'ids': [msg_id], 'removeLabelIds': ['UNREAD']}
-                ).execute()
+            # Mark as READ regardless of whether a ZIP was found 
+            # (Prevents broken emails from blocking the queue)
+            service.users().messages().batchModify(
+                userId='me',
+                body={'ids': [msg_id], 'removeLabelIds': ['UNREAD']}
+            ).execute()
 
         return zip_file_paths
 

@@ -26,18 +26,12 @@ from modules.pdf_parser import extract_employee_name
 from modules.validator import validate_employee      
 from modules.sheet_logger import update_report, get_already_passed_employees
 
-# --- Logging & Timezone Setup ---
+# --- Setup ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("payslip_automation")
-
-# IST Timezone constant
 IST = timezone(timedelta(hours=5, minutes=30))
 
-app = FastAPI(title="MainstreamTek Multi-User Production Pipeline")
-
-# --- Middleware (CORS) ---
-# Set FRONTEND_URL in Render env to your Vercel URL
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip('/')
+app = FastAPI(title="MainstreamTek Production Pipeline")
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,144 +41,104 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Session Storage ---
 USER_SESSIONS: Dict[str, dict] = {}
 
 def get_session_id(request: Request) -> Optional[str]:
-    """Extracts session_id from the Bearer token in headers."""
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
         return auth_header.split(" ")[1]
     return None
 
 def add_log(session_id: str, message: str):
-    """Adds a log entry with IST timestamp to the user's specific session."""
     if session_id in USER_SESSIONS:
         ist_now = datetime.now(IST).strftime("%H:%M:%S")
         USER_SESSIONS[session_id]["logs"].append(f"[{ist_now}] {message}")
         logger.info(f"Session {session_id[:8]}: {message}")
 
 def get_creds_from_session(session_id: str):
-    """Refreshes and returns Google Credentials from the session dict."""
     session = USER_SESSIONS.get(session_id)
-    if not session or not session.get("creds"):
-        return None
+    if not session or not session.get("creds"): return None
     try:
         creds_dict = session["creds"]
-        creds = Credentials(
-            token=creds_dict['token'],
-            refresh_token=creds_dict.get('refresh_token'),
-            token_uri=creds_dict['token_uri'],
-            client_id=creds_dict['client_id'],
-            client_secret=creds_dict['client_secret'],
-            scopes=creds_dict['scopes']
-        )
+        creds = Credentials(**creds_dict)
         if creds.expired and creds.refresh_token:
             creds.refresh(GoogleRequest())
             session['creds']['token'] = creds.token
         return creds
     except Exception as e:
-        logger.error(f"Credential refresh failed: {e}")
+        logger.error(f"Cred error: {e}")
         return None
 
-# --- API Endpoints ---
+# --- API ---
 
 @app.get("/auth/login")
 def login():
-    """Constructs a manual Login URL."""
     session_id = str(uuid.uuid4())
-    USER_SESSIONS[session_id] = {
-        "creds": None, "logs": [], "is_running": False, "last_run": None
-    }
+    USER_SESSIONS[session_id] = {"creds": None, "logs": [], "is_running": False, "last_run": None}
     params = {
         "client_id": os.getenv("GOOGLE_CLIENT_ID"),
         "redirect_uri": f"{os.getenv('BACKEND_URL').rstrip('/')}/auth/callback",
         "response_type": "code",
         "scope": " ".join(list(config.SCOPES)),
-        "access_type": "offline",
-        "prompt": "consent",
-        "state": session_id,
-        "include_granted_scopes": "true"
+        "access_type": "offline", "prompt": "consent", "state": session_id, "include_granted_scopes": "true"
     }
-    base_url = "https://accounts.google.com/o/oauth2/v2/auth"
-    auth_url = f"{base_url}?{urllib.parse.urlencode(params)}"
-    return {"url": auth_url}
+    url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+    return {"url": url}
 
 @app.get("/auth/callback")
 def auth_callback(code: str, state: str):
-    session_id = state 
-    if session_id not in USER_SESSIONS:
-        return RedirectResponse(url=f"{FRONTEND_URL}?error=invalid_session")
+    if state not in USER_SESSIONS: return RedirectResponse(url=f"{os.getenv('FRONTEND_URL')}?error=session")
     try:
         token_data = {
-            'code': code,
-            'client_id': os.getenv("GOOGLE_CLIENT_ID"),
+            'code': code, 'client_id': os.getenv("GOOGLE_CLIENT_ID"),
             'client_secret': os.getenv("GOOGLE_CLIENT_SECRET"),
             'redirect_uri': f"{os.getenv('BACKEND_URL').rstrip('/')}/auth/callback",
             'grant_type': 'authorization_code',
         }
         res = requests.post("https://oauth2.googleapis.com/token", data=token_data).json()
-        if 'error' in res:
-            raise Exception(res.get('error_description', res['error']))
-
-        USER_SESSIONS[session_id]["creds"] = {
-            "token": res['access_token'],
-            "refresh_token": res.get('refresh_token'),
+        USER_SESSIONS[state]["creds"] = {
+            "token": res['access_token'], "refresh_token": res.get('refresh_token'),
             "token_uri": "https://oauth2.googleapis.com/token",
             "client_id": os.getenv("GOOGLE_CLIENT_ID"),
-            "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
-            "scopes": config.SCOPES
+            "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"), "scopes": config.SCOPES
         }
-        return RedirectResponse(url=f"{FRONTEND_URL}/?session_id={session_id}")
+        return RedirectResponse(url=f"{os.getenv('FRONTEND_URL')}/?session_id={state}")
     except Exception as e:
-        logger.error(f"Callback Error: {e}")
-        return RedirectResponse(url=f"{FRONTEND_URL}?error=auth_failed")
+        return RedirectResponse(url=f"{os.getenv('FRONTEND_URL')}?error=auth")
 
 @app.get("/auth/status")
 def get_auth_status(request: Request):
-    session_id = get_session_id(request)
-    creds = get_creds_from_session(session_id)
+    creds = get_creds_from_session(get_session_id(request))
     if creds:
         try:
-            service = build('oauth2', 'v2', credentials=creds)
-            user_info = service.userinfo().get().execute()
+            user_info = build('oauth2', 'v2', credentials=creds).userinfo().get().execute()
             return {"authenticated": True, "email": user_info['email']}
         except: pass
     return {"authenticated": False}
 
 @app.post("/auth/logout")
 def logout(request: Request):
-    session_id = get_session_id(request)
-    if session_id in USER_SESSIONS:
-        del USER_SESSIONS[session_id]
-    return {"message": "Logged out successfully"}
+    sid = get_session_id(request)
+    if sid in USER_SESSIONS: del USER_SESSIONS[sid]
+    return {"message": "Logged out"}
 
 @app.get("/status")
 def get_status(request: Request):
-    session_id = get_session_id(request)
-    session = USER_SESSIONS.get(session_id)
-    if not session:
-        return {"is_running": False, "logs": [], "last_run": None}
-    return {
-        "is_running": session["is_running"],
-        "logs": session["logs"][-50:],
-        "last_run": session["last_run"]
-    }
+    session = USER_SESSIONS.get(get_session_id(request))
+    if not session: return {"is_running": False, "logs": [], "last_run": None}
+    return {"is_running": session["is_running"], "logs": session["logs"][-50:], "last_run": session["last_run"]}
 
 @app.post("/start")
 def start_process(background_tasks: BackgroundTasks, request: Request):
-    session_id = get_session_id(request)
-    session = USER_SESSIONS.get(session_id)
-    creds = get_creds_from_session(session_id)
-    if not creds or not session:
-        raise HTTPException(status_code=401, detail="Please login first.")
-    if session["is_running"]:
-        raise HTTPException(status_code=400, detail="Automation already running.")
-    
-    background_tasks.add_task(run_automation_pipeline, session_id, creds)
-    return {"message": "Pipeline started"}
+    sid = get_session_id(request)
+    session = USER_SESSIONS.get(sid)
+    creds = get_creds_from_session(sid)
+    if not creds or not session: raise HTTPException(status_code=401)
+    if session["is_running"]: raise HTTPException(status_code=400)
+    background_tasks.add_task(run_automation_pipeline, sid, creds)
+    return {"message": "Started"}
 
-# --- Core Pipeline Logic ---
+# --- Pipeline ---
 
 def run_automation_pipeline(session_id, creds):
     session = USER_SESSIONS[session_id]
@@ -193,31 +147,26 @@ def run_automation_pipeline(session_id, creds):
     add_log(session_id, "🚀 INITIALIZING PIPELINE (IST MODE)...")
 
     try:
-        # 1. Sync Master Sheet
-        sheets_service = build('sheets', 'v4', credentials=creds)
-        res = sheets_service.spreadsheets().values().get(
-            spreadsheetId=config.MASTER_SHEET_ID, range="Sheet1!A1:Z200"
-        ).execute()
-        raw_rows = res.get('values', [])
-        rows = [r for r in raw_rows if any(cell.strip() for cell in r if cell)]
+        # 1. Master Sheet
+        sheets = build('sheets', 'v4', credentials=creds)
+        res = sheets.spreadsheets().values().get(spreadsheetId=config.MASTER_SHEET_ID, range="Sheet1!A1:Z200").execute()
+        rows = [r for r in res.get('values', []) if any(c.strip() for c in r if c)]
         headers = [h.strip() for h in rows[0]]
         master_df = pd.DataFrame([dict(zip(headers, r + [""]*(len(headers)-len(r)))) for r in rows[1:]])
-        add_log(session_id, f"✅ Master Data Loaded: {len(master_df)} employees found.")
+        add_log(session_id, f"✅ Master Data Loaded: {len(master_df)} employees.")
 
-        # 2. Fetch ZIPs from Gmail
+        # 2. Get ZIPs
         zip_paths = fetch_zip_from_mail(creds)
         if not zip_paths:
-            add_log(session_id, "⚠️ No new unread payroll ZIPs found.")
+            add_log(session_id, "⚠️ No new unread payroll emails found.")
             return
         add_log(session_id, f"📬 Found {len(zip_paths)} email(s) to process.")
 
         # 3. Processing Loop
         month_cache = {}
-
         for zip_path in zip_paths:
-            # FIX: Verify zip_path is a file and not a directory string like '/'
+            # SAFETY CHECK: Skip if the path is not a file (fixes IsADirectoryError)
             if not zip_path or not os.path.isfile(zip_path):
-                logger.warning(f"Invalid path found in zip_paths: {zip_path}")
                 continue
 
             zip_name = os.path.basename(zip_path)
@@ -230,39 +179,34 @@ def run_automation_pipeline(session_id, creds):
                 for path in pdf_files:
                     data = extract_employee_name(path)
                     if not data: continue
+                    name, month = data.get("Employee Name", "Unknown"), data.get("Month", "Unknown")
 
-                    emp_name = data.get("Employee Name", "Unknown")
-                    month = data.get("Month", "Unknown")
-
-                    # DUPLICATE PREVENTION: Skip if PASS
                     if month not in month_cache:
                         month_cache[month] = get_already_passed_employees(month, creds)
                     
-                    if emp_name in month_cache[month]:
-                        add_log(session_id, f"   - ⏭️ SKIP: {emp_name} (Already PASS)")
+                    if name in month_cache[month]:
+                        add_log(session_id, f"   - ⏭️ SKIP: {name} (Already PASS)")
                         continue
 
-                    add_log(session_id, f"   - Validating: {emp_name}")
-                    file_id = upload_to_drive(path, creds)
-                    val_res = validate_employee(data, master_df)
+                    add_log(session_id, f"   - Validating: {name}")
+                    fid = upload_to_drive(path, creds)
+                    val = validate_employee(data, master_df)
                     
-                    if val_res["status"] == "PASS":
+                    if val["status"] == "PASS":
                         add_log(session_id, f"   - ✅ SENDING EMAIL...")
-                        send_employee_mail(val_res["email"], path, emp_name, month, creds)
-                        move_file(file_id, config.SENT_FOLDER_ID, month, creds)
+                        send_employee_mail(val["email"], path, name, month, creds)
+                        move_file(fid, config.SENT_FOLDER_ID, month, creds)
                     else:
-                        add_log(session_id, f"   - ❌ FAIL: {val_res.get('reason')}")
-                        move_file(file_id, config.ERROR_FOLDER_ID, month, creds)
+                        add_log(session_id, f"   - ❌ FAIL: {val.get('reason')}")
+                        move_file(fid, config.ERROR_FOLDER_ID, month, creds)
 
-                    # Update or Overwrite Log Sheet
-                    update_report(emp_name, val_res, month, creds)
+                    update_report(name, val, month, creds)
 
-                if os.path.exists(pdf_folder):
-                    shutil.rmtree(pdf_folder)
+                if os.path.exists(pdf_folder): shutil.rmtree(pdf_folder)
             except Exception as e:
-                add_log(session_id, f"   - ❌ Zip Error ({zip_name}): {str(e)}")
+                add_log(session_id, f"   - ❌ Error in ZIP {zip_name}: {str(e)}")
 
-        add_log(session_id, "🎉 ALL EMAILS PROCESSED SUCCESSFULLY.")
+        add_log(session_id, "🎉 ALL TASKS FINISHED.")
 
     except Exception as e:
         add_log(session_id, f"🚨 CRITICAL ERROR: {str(e)}")
@@ -271,11 +215,9 @@ def run_automation_pipeline(session_id, creds):
         session["is_running"] = False
         session["last_run"] = datetime.now(IST).isoformat()
         try:
-            if os.path.exists(config.TEMP_FOLDER):
-                shutil.rmtree(config.TEMP_FOLDER)
+            if os.path.exists(config.TEMP_FOLDER): shutil.rmtree(config.TEMP_FOLDER)
         except: pass
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
